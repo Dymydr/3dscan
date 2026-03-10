@@ -1,0 +1,164 @@
+@import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@300;400;500;600;700&family=DM+Sans:wght@300;400;500;600;700&family=Space+Mono:wght@400;700&display=swap');
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --background: #0d0f12;
+  --surface: #13161b;
+  --surface-2: #1a1f27;
+  --border: #2a3040;
+  --accent: #00e5ff;
+  --accent-dim: #0099aa;
+  --text: #e8edf5;
+  --text-dim: #7a8899;
+}
+
+* {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+html,
+body {
+  background: var(--background);
+  color: var(--text);
+  font-family: 'DM Sans', system-ui, sans-serif;
+  overflow-x: hidden;
+  -webkit-tap-highlight-color: transparent;
+  -webkit-touch-callout: none;
+  user-select: none;
+}
+
+/* Scrollbar styling */
+::-webkit-scrollbar {
+  width: 4px;
+  height: 4px;
+}
+::-webkit-scrollbar-track {
+  background: var(--surface);
+}
+::-webkit-scrollbar-thumb {
+  background: var(--border);
+  border-radius: 2px;
+}
+
+/* AR canvas fullscreen */
+canvas.ar-canvas {
+  position: fixed;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 100%;
+  z-index: 0;
+}
+
+/* Scan ring animation */
+@keyframes scanPulse {
+  0%, 100% { opacity: 0.4; transform: scale(0.95); }
+  50% { opacity: 1; transform: scale(1.05); }
+}
+
+@keyframes scanLine {
+  0% { transform: translateY(-50vh); }
+  100% { transform: translateY(50vh); }
+}
+
+@keyframes glowPulse {
+  0%, 100% { box-shadow: 0 0 10px rgba(0, 229, 255, 0.3); }
+  50% { box-shadow: 0 0 25px rgba(0, 229, 255, 0.6); }
+}
+
+@keyframes fadeIn {
+  from { opacity: 0; transform: translateY(10px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+.scan-ring {
+  animation: scanPulse 2s ease-in-out infinite;
+}
+
+.glow-pulse {
+  animation: glowPulse 2s ease-in-out infinite;
+}
+
+.fade-in {
+  animation: fadeIn 0.3s ease-out forwards;
+}
+
+/* Glass morphism panels */
+.glass-panel {
+  background: rgba(13, 15, 18, 0.85);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  border: 1px solid rgba(42, 48, 64, 0.8);
+}
+
+/* Metric display */
+.metric-value {
+  font-family: 'JetBrains Mono', monospace;
+  font-variant-numeric: tabular-nums;
+}
+
+/* Touch targets */
+.touch-target {
+  min-width: 48px;
+  min-height: 48px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+/* Accent button */
+.btn-accent {
+  background: var(--accent);
+  color: var(--background);
+  font-family: 'DM Sans', sans-serif;
+  font-weight: 600;
+  border-radius: 8px;
+  padding: 12px 24px;
+  border: none;
+  cursor: pointer;
+  transition: all 0.2s;
+}
+
+.btn-accent:hover {
+  background: #33eeff;
+  box-shadow: 0 0 20px rgba(0, 229, 255, 0.4);
+}
+
+.btn-accent:active {
+  transform: scale(0.97);
+}
+
+/* Progress bar */
+.progress-bar {
+  background: linear-gradient(90deg, var(--accent-dim), var(--accent));
+  box-shadow: 0 0 10px rgba(0, 229, 255, 0.4);
+}
+
+/* Grid overlay for scan guide */
+.scan-grid {
+  background-image:
+    linear-gradient(rgba(0, 229, 255, 0.05) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(0, 229, 255, 0.05) 1px, transparent 1px);
+  background-size: 40px 40px;
+}
+
+/* WebGL canvas wrapper */
+.canvas-wrapper {
+  position: relative;
+  width: 100%;
+  height: 100%;
+}
+
+/* Safe area insets for iPhone */
+.safe-bottom {
+  padding-bottom: env(safe-area-inset-bottom, 16px);
+}
+
+.safe-top {
+  padding-top: env(safe-area-inset-top, 0px);
+}
