@@ -23,10 +23,10 @@ const nextConfig = {
   },
   headers: async () => [
     {
-      source: '/(.*)',
+      // Serve service worker with no-cache so updates are picked up immediately
+      source: '/sw.js',
       headers: [
-        { key: 'Cross-Origin-Opener-Policy', value: 'same-origin' },
-        { key: 'Cross-Origin-Embedder-Policy', value: 'require-corp' },
+        { key: 'Cache-Control', value: 'public, max-age=0, must-revalidate' },
       ],
     },
   ],
