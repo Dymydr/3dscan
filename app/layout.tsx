@@ -41,6 +41,9 @@ export default function RootLayout({
   return (
     <html lang="en" className="dark">
       <head>
+        {/* Apple PWA: explicit link tags (Safari checks these before manifest) */}
+        <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
+        <link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png" />
         {/* Load fonts at runtime so build server doesn't need internet access */}
         <link rel="preconnect" href="https://fonts.googleapis.com" />
         <link rel="preconnect" href="https://fonts.gstatic.com" crossOrigin="anonymous" />
