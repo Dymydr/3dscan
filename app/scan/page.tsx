@@ -5,7 +5,7 @@ import { useRouter } from 'next/navigation'
 import dynamic from 'next/dynamic'
 import { useScanStore } from '@/store/scan-store'
 import { PointCloudAccumulator } from '@/lib/pointcloud/accumulator'
-import { checkARSupport, requestCameraPermission, startXRSession, stopXRSession } from '@/lib/lidar/session'
+import { checkARSupport, startXRSession, stopXRSession } from '@/lib/lidar/session'
 import { startDemoMode, stopDemoMode } from '@/lib/lidar/demo-sequence'
 import { generateScanId, saveScanRecord, savePointCloud } from '@/lib/storage/indexeddb'
 import type { DepthFrame } from '@/lib/lidar/types'
@@ -84,19 +84,10 @@ export default function ScanPage() {
       return
     }
 
-    // Step 1: explicit camera permission request (shows iOS dialog)
-    setStatusMsg('Requesting camera access…')
-    try {
-      await requestCameraPermission()
-    } catch {
-      store.setError('Camera access denied. Open Settings → Privacy → Camera → Safari and allow access.')
-      store.setScanState('error')
-      setStatusMsg('')
-      return
-    }
-
-    // Step 2: WebXR session — depth-sensing is optional
-    setStatusMsg('Starting AR…')
+    // requestSession triggers the iOS camera permission dialog automatically.
+    // Do NOT call getUserMedia first — it takes exclusive camera access
+    // and prevents the XR session from starting.
+    setStatusMsg('Starting AR — allow camera when prompted…')
     try {
       store.setDemoMode(false)
       const result = await startXRSession({
@@ -201,17 +192,26 @@ export default function ScanPage() {
   const noDepth   = store.error === 'no-depth'
   const showCloud = !!store.pointCloud && store.pointCloud.length > 0
 
+  // In AR mode the root div MUST be transparent — the WebXR canvas behind it
+  // shows the live camera feed. Any opaque background here will block the camera.
+  const arActive = isScanning || isPaused
   return (
-    <div id="ar-overlay" className="fixed inset-0 bg-black overflow-hidden">
+    <div
+      id="ar-overlay"
+      className="fixed inset-0 overflow-hidden"
+      style={{ background: arActive ? 'transparent' : undefined }}
+    >
+      {/* Dark background only shown before AR starts (idle / demo) */}
+      {!arActive && <div className="absolute inset-0 bg-black" />}
 
-      {/* Live point cloud overlay */}
+      {/* Point cloud overlay — semi-transparent so camera still visible behind it */}
       {showCloud && (
-        <div className="absolute inset-0 z-10 pointer-events-none" style={{ opacity: 0.75 }}>
+        <div className="absolute inset-0 z-10 pointer-events-none" style={{ opacity: 0.55 }}>
           <PointCloudViewer points={store.pointCloud!} autoRotate={isPaused} pointSize={0.004} />
         </div>
       )}
 
-      {/* Idle placeholder */}
+      {/* Idle placeholder (shown when no AR and no cloud yet) */}
       {isIdle && !showCloud && (
         <div className="absolute inset-0 z-0 flex items-center justify-center scan-grid bg-background">
           <div className="text-center">
