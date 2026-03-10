@@ -1,16 +1,15 @@
 'use client'
 
-import { useEffect, useRef, useCallback } from 'react'
+import { useEffect, useRef, useCallback, useState } from 'react'
 import { useRouter } from 'next/navigation'
 import dynamic from 'next/dynamic'
 import { useScanStore } from '@/store/scan-store'
 import { PointCloudAccumulator } from '@/lib/pointcloud/accumulator'
-import { startXRSession, stopXRSession, checkDepthSensingSupport } from '@/lib/lidar/session'
+import { checkARSupport, requestCameraPermission, startXRSession, stopXRSession } from '@/lib/lidar/session'
 import { startDemoMode, stopDemoMode } from '@/lib/lidar/demo-sequence'
 import { generateScanId, saveScanRecord, savePointCloud } from '@/lib/storage/indexeddb'
 import type { DepthFrame } from '@/lib/lidar/types'
 
-// Dynamically import heavy components
 const ScanHUD = dynamic(() => import('@/components/ScanHUD').then(m => ({ default: m.ScanHUD })), { ssr: false })
 const PointCloudViewer = dynamic(() => import('@/components/PointCloudViewer').then(m => ({ default: m.PointCloudViewer })), { ssr: false })
 
@@ -19,21 +18,19 @@ const AUTOSAVE_INTERVAL_MS = 30_000
 export default function ScanPage() {
   const router = useRouter()
   const store = useScanStore()
+  const [statusMsg, setStatusMsg] = useState<string>('')
 
   const accumulatorRef = useRef<PointCloudAccumulator | null>(null)
   const autosaveTimerRef = useRef<ReturnType<typeof setInterval> | null>(null)
-  const speechSynthRef = useRef<SpeechSynthesis | null>(null)
+  const speechRef = useRef<SpeechSynthesis | null>(null)
   const frameCountRef = useRef(0)
   const lastVoiceRef = useRef(0)
 
-  // Initialize
   useEffect(() => {
     store.reset()
-    store.setScanState('idle')
     if (typeof window !== 'undefined' && 'speechSynthesis' in window) {
-      speechSynthRef.current = window.speechSynthesis
+      speechRef.current = window.speechSynthesis
     }
-
     return () => {
       stopXRSession()
       stopDemoMode()
@@ -43,11 +40,9 @@ export default function ScanPage() {
 
   const processFrame = useCallback((frame: DepthFrame) => {
     if (!accumulatorRef.current) return
-
     accumulatorRef.current.addFrame(frame)
     frameCountRef.current++
 
-    // Update store every 5 frames to reduce re-renders
     if (frameCountRef.current % 5 === 0) {
       const metrics = accumulatorRef.current.getQualityMetrics()
       store.setPointCount(metrics.pointCount)
@@ -56,24 +51,12 @@ export default function ScanPage() {
       store.setCoverageAngles(accumulatorRef.current.getCoverageAngles())
       store.setPointCloud(accumulatorRef.current.getColoredPointCloud())
 
-      // Voice guidance (max once per 5 seconds)
       const now = Date.now()
       if (now - lastVoiceRef.current > 5000) {
-        if (metrics.coveragePercent < 30) {
-          speak('Walk around the object slowly')
-        } else if (metrics.coveragePercent < 60) {
-          speak('Keep going, scan the top and sides')
-        } else if (metrics.score > 70) {
-          speak('Good coverage. Ready to process.')
-        }
+        if (metrics.coveragePercent < 30) speak('Walk around the object slowly')
+        else if (metrics.coveragePercent < 60) speak('Keep going, scan the top and sides')
+        else if (metrics.score > 70) speak('Good coverage, ready to process')
         lastVoiceRef.current = now
-      }
-
-      // Haptic feedback on quality milestones
-      if (metrics.score > 50 && metrics.score <= 55) {
-        triggerHaptic('medium')
-      } else if (metrics.score > 75 && metrics.score <= 80) {
-        triggerHaptic('heavy')
       }
     }
   }, [store])
@@ -81,112 +64,110 @@ export default function ScanPage() {
   const handleStart = useCallback(async () => {
     store.setScanState('requesting-permission')
     store.setError(null)
+    setStatusMsg('Checking support…')
 
     const scanId = generateScanId()
     store.setCurrentScanId(scanId)
-
-    accumulatorRef.current = new PointCloudAccumulator({
-      voxelSize: 0.005,
-      maxPoints: 300_000,
-    })
+    accumulatorRef.current = new PointCloudAccumulator({ voxelSize: 0.005, maxPoints: 300_000 })
     frameCountRef.current = 0
 
-    // Check XR support
-    const { supported } = await checkDepthSensingSupport()
+    const { supported } = await checkARSupport()
 
     if (!supported) {
-      // Offer demo mode
+      // Desktop or non-AR device → demo mode, no camera needed
+      setStatusMsg('')
       store.setDemoMode(true)
       store.setScanState('scanning')
-      speak('Starting demo scan mode')
-
-      startDemoMode({
-        onFrame: processFrame,
-        onComplete: () => {
-          store.setScanState('paused')
-          speak('Demo scan complete. Ready to process.')
-        },
-      })
-    } else {
-      // Real LiDAR scan
-      try {
-        store.setDemoMode(false)
-        await startXRSession({
-          onFrame: processFrame,
-          onError: (error) => {
-            store.setError(error.message)
-            store.setScanState('error')
-          },
-          onEnd: () => {
-            if (store.scanState === 'scanning') {
-              store.setScanState('paused')
-            }
-          },
-        })
-        store.setScanState('scanning')
-        speak('LiDAR scan started. Walk slowly around the object.')
-      } catch (e) {
-        // Fall back to demo if XR fails (e.g. not installed as PWA)
-        store.setDemoMode(true)
-        store.setScanState('scanning')
-        startDemoMode({
-          onFrame: processFrame,
-          onComplete: () => store.setScanState('paused'),
-        })
-      }
+      speak('Demo mode active')
+      startDemoMode({ onFrame: processFrame, onComplete: () => store.setScanState('paused') })
+      startAutosave(scanId)
+      return
     }
 
-    // Start autosave
-    autosaveTimerRef.current = setInterval(() => autoSave(scanId), AUTOSAVE_INTERVAL_MS)
+    // Step 1: explicit camera permission request (shows iOS dialog)
+    setStatusMsg('Requesting camera access…')
+    try {
+      await requestCameraPermission()
+    } catch {
+      store.setError('Camera access denied. Open Settings → Privacy → Camera → Safari and allow access.')
+      store.setScanState('error')
+      setStatusMsg('')
+      return
+    }
+
+    // Step 2: WebXR session — depth-sensing is optional
+    setStatusMsg('Starting AR…')
+    try {
+      store.setDemoMode(false)
+      const result = await startXRSession({
+        onFrame: processFrame,
+        onError: (err) => { store.setError(err.message); store.setScanState('error'); setStatusMsg('') },
+        onEnd: () => { if (store.scanState === 'scanning') store.setScanState('paused') },
+      })
+
+      store.setScanState('scanning')
+      setStatusMsg('')
+
+      if (result.hasDepthSensing) {
+        speak('LiDAR active. Walk slowly around the object.')
+      } else {
+        store.setError('no-depth')
+        speak('Camera started. LiDAR depth not available — use demo mode for full test.')
+      }
+
+      startAutosave(scanId)
+    } catch (e) {
+      // XR session failed — fall back to demo
+      console.warn('XR session failed, using demo:', e)
+      store.setDemoMode(true)
+      store.setScanState('scanning')
+      setStatusMsg('')
+      speak('Using demo mode')
+      startDemoMode({ onFrame: processFrame, onComplete: () => store.setScanState('paused') })
+      startAutosave(scanId)
+    }
   }, [processFrame, store])
 
   const handlePause = useCallback(() => {
-    stopXRSession()
-    stopDemoMode()
+    stopXRSession(); stopDemoMode()
     store.setScanState('paused')
-    speak('Scan paused')
+    speak('Paused')
   }, [store])
 
   const handleResume = useCallback(async () => {
-    if (!accumulatorRef.current) return
-    const { supported } = await checkDepthSensingSupport()
-
-    if (!supported || store.isDemoMode) {
+    if (store.isDemoMode) {
       store.setScanState('scanning')
-      startDemoMode({
+      startDemoMode({ onFrame: processFrame, onComplete: () => store.setScanState('paused') })
+      return
+    }
+    setStatusMsg('Resuming…')
+    try {
+      await startXRSession({
         onFrame: processFrame,
-        onComplete: () => store.setScanState('paused'),
+        onError: (e) => { store.setError(e.message); store.setScanState('error') },
+        onEnd: () => { if (store.scanState === 'scanning') store.setScanState('paused') },
       })
-    } else {
-      try {
-        await startXRSession({
-          onFrame: processFrame,
-          onError: (e) => { store.setError(e.message); store.setScanState('error') },
-          onEnd: () => { if (store.scanState === 'scanning') store.setScanState('paused') },
-        })
-        store.setScanState('scanning')
-      } catch {
-        store.setScanState('scanning')
-        startDemoMode({ onFrame: processFrame, onComplete: () => store.setScanState('paused') })
-      }
+      store.setScanState('scanning')
+      setStatusMsg('')
+    } catch {
+      store.setDemoMode(true)
+      store.setScanState('scanning')
+      setStatusMsg('')
+      startDemoMode({ onFrame: processFrame, onComplete: () => store.setScanState('paused') })
     }
   }, [processFrame, store])
 
   const handleStop = useCallback(async () => {
-    stopXRSession()
-    stopDemoMode()
-
-    if (autosaveTimerRef.current) {
-      clearInterval(autosaveTimerRef.current)
-    }
-
+    stopXRSession(); stopDemoMode()
+    if (autosaveTimerRef.current) clearInterval(autosaveTimerRef.current)
     const scanId = store.currentScanId
-    if (scanId && accumulatorRef.current) {
-      await autoSave(scanId)
-    }
-
+    if (scanId && accumulatorRef.current) await autoSave(scanId)
     router.push('/process')
   }, [store, router])
+
+  function startAutosave(scanId: string) {
+    autosaveTimerRef.current = setInterval(() => autoSave(scanId), AUTOSAVE_INTERVAL_MS)
+  }
 
   async function autoSave(scanId: string) {
     if (!accumulatorRef.current) return
@@ -197,54 +178,42 @@ export default function ScanPage() {
       await saveScanRecord({
         id: scanId,
         name: `Scan ${new Date().toLocaleDateString()} ${new Date().toLocaleTimeString()}`,
-        createdAt: Date.now(),
-        updatedAt: Date.now(),
-        pointCount: metrics.pointCount,
-        hasMesh: false,
+        createdAt: Date.now(), updatedAt: Date.now(),
+        pointCount: metrics.pointCount, hasMesh: false,
       })
-    } catch (e) {
-      console.warn('Autosave failed:', e)
-    }
+    } catch (e) { console.warn('Autosave failed:', e) }
   }
 
   function speak(text: string) {
-    if (!speechSynthRef.current) return
+    if (!speechRef.current) return
     try {
-      speechSynthRef.current.cancel()
-      const utterance = new SpeechSynthesisUtterance(text)
-      utterance.rate = 1.1
-      utterance.volume = 0.7
-      speechSynthRef.current.speak(utterance)
+      speechRef.current.cancel()
+      const u = new SpeechSynthesisUtterance(text)
+      u.rate = 1.1; u.volume = 0.7
+      speechRef.current.speak(u)
     } catch { /* ignore */ }
   }
 
-  function triggerHaptic(style: 'light' | 'medium' | 'heavy') {
-    if ('vibrate' in navigator) {
-      const pattern = style === 'light' ? [30] : style === 'medium' ? [50, 30, 50] : [100, 50, 100]
-      navigator.vibrate(pattern)
-    }
-  }
-
+  const isIdle    = store.scanState === 'idle' || store.scanState === 'requesting-permission'
   const isScanning = store.scanState === 'scanning'
-  const showPointCloud = store.pointCloud && store.pointCloud.length > 0
-  const hasError = store.scanState === 'error'
+  const isPaused  = store.scanState === 'paused'
+  const realError = store.scanState === 'error' && store.error !== 'no-depth'
+  const noDepth   = store.error === 'no-depth'
+  const showCloud = !!store.pointCloud && store.pointCloud.length > 0
 
   return (
-    <div className="fixed inset-0 bg-background overflow-hidden">
-      {/* Live Point Cloud Background */}
-      {showPointCloud && (
-        <div className="absolute inset-0 z-0 opacity-70">
-          <PointCloudViewer
-            points={store.pointCloud!}
-            autoRotate={!isScanning}
-            pointSize={0.004}
-          />
+    <div id="ar-overlay" className="fixed inset-0 bg-black overflow-hidden">
+
+      {/* Live point cloud overlay */}
+      {showCloud && (
+        <div className="absolute inset-0 z-10 pointer-events-none" style={{ opacity: 0.75 }}>
+          <PointCloudViewer points={store.pointCloud!} autoRotate={isPaused} pointSize={0.004} />
         </div>
       )}
 
-      {/* AR Camera placeholder (shown when WebXR is active) */}
-      {!showPointCloud && (
-        <div className="absolute inset-0 z-0 flex items-center justify-center scan-grid">
+      {/* Idle placeholder */}
+      {isIdle && !showCloud && (
+        <div className="absolute inset-0 z-0 flex items-center justify-center scan-grid bg-background">
           <div className="text-center">
             <div className="w-24 h-24 border-2 border-accent/20 rounded-full mx-auto mb-4 flex items-center justify-center scan-ring">
               <div className="w-16 h-16 border-2 border-accent/40 rounded-full flex items-center justify-center">
@@ -256,33 +225,58 @@ export default function ScanPage() {
         </div>
       )}
 
-      {/* Scanning line animation */}
+      {/* Scan line */}
       {isScanning && (
-        <div className="absolute inset-0 z-1 overflow-hidden pointer-events-none">
-          <div
-            className="absolute w-full h-0.5 bg-gradient-to-r from-transparent via-accent to-transparent opacity-30"
-            style={{ animation: 'scanLine 3s ease-in-out infinite' }}
-          />
+        <div className="absolute inset-0 z-10 overflow-hidden pointer-events-none">
+          <div className="absolute w-full h-0.5 bg-gradient-to-r from-transparent via-accent to-transparent opacity-20"
+            style={{ animation: 'scanLine 3s ease-in-out infinite' }} />
         </div>
       )}
 
-      {/* Error state */}
-      {hasError && (
-        <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 z-20 glass-panel rounded-2xl p-6 mx-4 text-center">
-          <div className="text-error text-4xl mb-3">⚠</div>
-          <h2 className="font-sans font-bold text-text mb-2">Scan Error</h2>
-          <p className="font-mono text-xs text-text-dim mb-4">{store.error}</p>
-          <button
-            onClick={() => { store.reset(); router.push('/setup') }}
-            className="btn-accent px-6 py-3"
-          >
-            View Setup Guide
-          </button>
+      {/* Loading/status overlay */}
+      {statusMsg !== '' && (
+        <div className="absolute inset-0 z-30 flex items-center justify-center">
+          <div className="glass-panel rounded-2xl px-8 py-5 text-center">
+            <div className="w-8 h-8 border-2 border-accent border-t-transparent rounded-full animate-spin mx-auto mb-3" />
+            <p className="font-mono text-sm text-accent">{statusMsg}</p>
+          </div>
         </div>
       )}
 
-      {/* HUD overlay */}
-      {!hasError && (
+      {/* No-depth warning banner */}
+      {noDepth && isScanning && (
+        <div className="absolute top-20 left-4 right-4 z-20 glass-panel rounded-xl p-3 border border-warning/40">
+          <p className="font-mono text-xs text-warning leading-relaxed">
+            ⚠ LiDAR depth requires iPhone 12 Pro+ with iOS 16. Camera is active but no depth data.
+          </p>
+          <button className="font-mono text-xs text-text-dim mt-2 underline"
+            onClick={() => store.setError(null)}>Dismiss</button>
+        </div>
+      )}
+
+      {/* Error overlay */}
+      {realError && (
+        <div className="absolute inset-0 z-30 bg-background/90 flex items-center justify-center px-6">
+          <div className="glass-panel rounded-2xl p-6 text-center max-w-sm w-full border border-error/30">
+            <div className="text-4xl mb-3">⚠</div>
+            <h2 className="font-sans font-bold text-text mb-2">Camera Error</h2>
+            <p className="font-mono text-xs text-text-dim mb-5 leading-relaxed">{store.error}</p>
+            <div className="flex gap-3">
+              <button onClick={() => router.push('/setup')}
+                className="flex-1 py-3 border border-border rounded-lg font-sans text-sm text-text-dim">
+                Setup Guide
+              </button>
+              <button onClick={() => { store.reset(); store.setScanState('idle') }}
+                className="flex-1 py-3 bg-accent text-background rounded-lg font-sans font-bold text-sm">
+                Try Again
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* HUD controls */}
+      {!realError && statusMsg === '' && (
         <ScanHUD
           onStart={handleStart}
           onPause={handlePause}
@@ -291,12 +285,10 @@ export default function ScanPage() {
         />
       )}
 
-      {/* Navigation back */}
-      <button
-        onClick={() => router.push('/history')}
-        className="absolute top-4 left-4 z-20 glass-panel rounded-lg p-2 touch-target"
-        style={{ marginTop: 'env(safe-area-inset-top, 0px)' }}
-      >
+      {/* Back button */}
+      <button onClick={() => router.push('/history')}
+        className="absolute top-4 left-4 z-40 glass-panel rounded-lg p-2 touch-target"
+        style={{ marginTop: 'env(safe-area-inset-top, 0px)' }}>
         <svg width="20" height="20" viewBox="0 0 20 20" fill="none">
           <path d="M3 10h14M3 10l5-5M3 10l5 5" stroke="#7a8899" strokeWidth="1.5" strokeLinecap="round"/>
         </svg>
